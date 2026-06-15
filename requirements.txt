@@ -8,8 +8,7 @@ einops
 pillow
 
 # Phase 2: evaluation
-scipy
-pytorch-fid
+scipy                  # FID: matrix square root via scipy.linalg.sqrtm
 
 # Phase 3: text conditioning
 ftfy
