@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.models.unet import UNet
 from src.utils.diffusion import NoiseScheduler
-from src.utils.sampling import SamplingCoeffs, ddpm_sample
+from src.utils.sampling import SamplingCoeffs, ddim_sample, ddpm_sample
 
 
 # ---------------------------------------------------------------------------
@@ -127,16 +127,28 @@ def generate(
         cfg["dataset"]["image_size"],
         cfg["dataset"]["image_size"],
     )
+    sampler_type = cfg["training"].get("sampler", "ddpm")
+    ddim_steps   = cfg["training"].get("ddim_steps", 50)
+    ddim_eta     = cfg["training"].get("ddim_eta", 0.0)
+    sampler_info = (f"ddim ({ddim_steps} steps, η={ddim_eta})"
+                    if sampler_type == "ddim" else "ddpm")
+
     print(f"Checkpoint : {checkpoint_path.name}  (epoch {epoch})")
     print(f"Device     : {device}")
+    print(f"Schedule   : {cfg['diffusion'].get('beta_schedule', 'linear')}")
+    print(f"Sampler    : {sampler_info}")
     print(f"Generating : {n} images  |  grid {grid_nrow} per row  |  shape {img_shape}")
 
-    coeffs  = SamplingCoeffs(scheduler)
-    samples = ddpm_sample(
-        model, scheduler,
-        n_samples=n, img_shape=img_shape,
-        device=device, show_progress=True, coeffs=coeffs,
-    )
+    if sampler_type == "ddim":
+        samples = ddim_sample(
+            model, scheduler, n_samples=n, img_shape=img_shape,
+            device=device, n_steps=ddim_steps, eta=ddim_eta, show_progress=True,
+        )
+    else:
+        samples = ddpm_sample(
+            model, scheduler, n_samples=n, img_shape=img_shape,
+            device=device, show_progress=True, coeffs=SamplingCoeffs(scheduler),
+        )
 
     # --- Save ---
     _save_grid(samples, output_path, nrow=grid_nrow)

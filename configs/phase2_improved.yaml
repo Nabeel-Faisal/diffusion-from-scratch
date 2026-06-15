@@ -1,0 +1,43 @@
+# Phase 2: Improved DDPM — cosine schedule + DDIM sampling
+#
+# Changes from Phase 1:
+#   diffusion.beta_schedule : linear → cosine  (Nichol & Dhariwal 2021)
+#   diffusion.cosine_s      : offset for cosine schedule (paper default 0.008)
+#   training.sampler        : ddpm  → ddim     (Song et al. 2020)
+#   training.ddim_steps     : 50 denoising steps instead of 1000
+#   training.ddim_eta       : 0.0 = deterministic; 1.0 ≈ DDPM stochastic
+
+dataset:
+  name: "fashion_mnist"   # options: mnist, fashion_mnist
+  image_size: 28
+  channels: 1
+  batch_size: 128
+
+diffusion:
+  timesteps: 1000
+  beta_schedule: "cosine"   # "linear" (Phase 1) | "cosine" (Phase 2)
+  beta_start: 0.0001        # used only when beta_schedule = linear
+  beta_end: 0.02            # used only when beta_schedule = linear
+  cosine_s: 0.008           # cosine offset (Nichol & Dhariwal 2021, §3.2)
+
+model:
+  base_channels: 64
+  channel_mults: [1, 2, 4]
+  num_res_blocks: 2
+  time_emb_dim: 256
+
+training:
+  epochs: 30
+  learning_rate: 2.0e-4
+  device: "cuda"            # set to "cpu" for local debugging
+  save_every: 5
+  sample_every: 5
+  num_samples: 16
+  sampler: "ddim"           # "ddpm" | "ddim" — used for in-training sample grids
+  ddim_steps: 50            # number of DDIM denoising steps (only for sampler=ddim)
+  ddim_eta: 0.0             # 0.0 = deterministic, 1.0 ≈ DDPM stochastic
+
+paths:
+  checkpoint_dir: "outputs/checkpoints"
+  sample_dir: "outputs/samples"
+  log_dir: "outputs/logs"

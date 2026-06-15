@@ -1,5 +1,5 @@
 """
-Training script for Phase 1: Unconditional DDPM on Fashion-MNIST.
+Training script for unconditional DDPM (Phase 1 & 2).
 
 Algorithm (Ho et al. 2020, Algorithm 1):
   1. Sample x_0 from the dataset.
@@ -9,9 +9,12 @@ Algorithm (Ho et al. 2020, Algorithm 1):
   5. Predict ε̂ = UNet(x_t, t).
   6. Minimise  L = ||ε̂ - ε||²   (simplified ELBO, Eq. 14).
 
+The beta schedule (linear / cosine) and in-training sampler (ddpm / ddim)
+are read from the YAML config.
+
 Usage:
     python scripts/train.py --config configs/phase1_unconditional.yaml
-    python scripts/train.py --config configs/phase1_unconditional.yaml --device cpu
+    python scripts/train.py --config configs/phase2_improved.yaml --device cpu
 """
 
 import argparse
@@ -34,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.data.dataset import get_dataloader
 from src.models.unet import UNet
 from src.utils.diffusion import NoiseScheduler
+from src.utils.sampling import SamplingCoeffs, ddim_sample, ddpm_sample
 
 
 # ---------------------------------------------------------------------------
@@ -66,54 +70,6 @@ def save_checkpoint(path: Path, epoch: int, model: UNet,
         "optimizer_state_dict": optimizer.state_dict(),
         "config": cfg,
     }, path)
-
-
-@torch.no_grad()
-def sample_ddpm(
-    model: UNet,
-    scheduler: NoiseScheduler,
-    n_samples: int,
-    img_channels: int,
-    img_size: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """
-    DDPM ancestral sampling (Algorithm 2, Ho et al. 2020).
-
-    Starting from x_T ~ N(0, I), iterates the learned reverse process:
-
-      x_{t-1} = 1/√α_t · (x_t - β_t/√(1-ᾱ_t) · ε_θ(x_t, t)) + √β_t · z
-
-    where z ~ N(0, I) for t > 0 and z = 0 at the final step t = 0.
-
-    The variance σ²_t = β_t follows the "fixed small variance" choice from the paper.
-
-    Returns:
-        x_0 estimates, shape (n_samples, img_channels, img_size, img_size), in [-1, 1].
-    """
-    model.eval()
-    x = torch.randn(n_samples, img_channels, img_size, img_size, device=device)
-
-    for t_val in tqdm(reversed(range(scheduler.T)), total=scheduler.T,
-                      desc="Sampling", leave=False):
-        t_batch = torch.full((n_samples,), t_val, dtype=torch.long, device=device)
-
-        eps_pred = model(x, t_batch)
-
-        alpha_t          = scheduler.alphas[t_val]            # α_t
-        beta_t           = scheduler.betas[t_val]             # β_t
-        sqrt_1m_ab       = scheduler.sqrt_one_minus_alpha_bars[t_val]  # √(1-ᾱ_t)
-
-        # Posterior mean (DDPM Eq. 11)
-        mean = (1.0 / alpha_t.sqrt()) * (x - (beta_t / sqrt_1m_ab) * eps_pred)
-
-        if t_val > 0:
-            x = mean + beta_t.sqrt() * torch.randn_like(x)
-        else:
-            x = mean  # t = 0: no noise added
-
-    model.train()
-    return x
 
 
 def save_sample_grid(samples: torch.Tensor, path: Path, nrow: int = 4) -> None:
@@ -158,6 +114,8 @@ def train(cfg: dict, device_override=None) -> None:
         timesteps  = cfg["diffusion"]["timesteps"],
         beta_start = cfg["diffusion"]["beta_start"],
         beta_end   = cfg["diffusion"]["beta_end"],
+        schedule   = cfg["diffusion"].get("beta_schedule", "linear"),
+        cosine_s   = cfg["diffusion"].get("cosine_s", 0.008),
     ).to(device)
 
     model = UNet(
@@ -201,12 +159,24 @@ def train(cfg: dict, device_override=None) -> None:
     num_samples  = cfg["training"]["num_samples"]
     img_channels = cfg["dataset"]["channels"]
     img_size     = cfg["dataset"]["image_size"]
+    img_shape    = (img_channels, img_size, img_size)
     nrow         = int(num_samples ** 0.5)
 
+    sampler_type = cfg["training"].get("sampler", "ddpm")
+    ddim_steps   = cfg["training"].get("ddim_steps", 50)
+    ddim_eta     = cfg["training"].get("ddim_eta", 0.0)
+    # Precompute DDPM coefficients once; DDIM does not use them.
+    sampling_coeffs = SamplingCoeffs(scheduler) if sampler_type == "ddpm" else None
+
     n_params = sum(p.numel() for p in model.parameters())
+    schedule_name = cfg["diffusion"].get("beta_schedule", "linear")
+    sampler_info  = (f"ddim  ({ddim_steps} steps, η={ddim_eta})"
+                     if sampler_type == "ddim" else "ddpm")
     print(f"Device     : {device}")
     print(f"Model      : {n_params:,} parameters")
     print(f"Dataset    : {cfg['dataset']['name']}  (batch {cfg['dataset']['batch_size']})")
+    print(f"Schedule   : {schedule_name}")
+    print(f"Sampler    : {sampler_info}")
     print(f"Epochs     : {n_epochs}  |  save every {save_every}  |  sample every {sample_every}")
 
     step_losses: list = []
@@ -262,9 +232,16 @@ def train(cfg: dict, device_override=None) -> None:
 
         # --- Sample grid ---
         if epoch % sample_every == 0:
-            samples = sample_ddpm(
-                model, scheduler, num_samples, img_channels, img_size, device
-            )
+            if sampler_type == "ddim":
+                samples = ddim_sample(
+                    model, scheduler, num_samples, img_shape, device,
+                    n_steps=ddim_steps, eta=ddim_eta,
+                )
+            else:
+                samples = ddpm_sample(
+                    model, scheduler, num_samples, img_shape, device,
+                    coeffs=sampling_coeffs,
+                )
             sp = sample_dir / f"epoch_{epoch:04d}.png"
             save_sample_grid(samples, sp, nrow=nrow)
             print(f"     samples    → {sp}")
