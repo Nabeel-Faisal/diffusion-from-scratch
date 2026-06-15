@@ -174,7 +174,7 @@ def train(cfg: dict, device_override=None) -> None:
 
     loader, _ = get_dataloader(
         name        = cfg["dataset"]["name"],
-        batch_size  = cfg["training"]["batch_size"],
+        batch_size  = cfg["dataset"]["batch_size"],
         train       = True,
         num_workers = 4 if use_cuda else 0,
         pin_memory  = use_cuda,
@@ -206,7 +206,7 @@ def train(cfg: dict, device_override=None) -> None:
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Device     : {device}")
     print(f"Model      : {n_params:,} parameters")
-    print(f"Dataset    : {cfg['dataset']['name']}  (batch {cfg['training']['batch_size']})")
+    print(f"Dataset    : {cfg['dataset']['name']}  (batch {cfg['dataset']['batch_size']})")
     print(f"Epochs     : {n_epochs}  |  save every {save_every}  |  sample every {sample_every}")
 
     step_losses: list = []
