@@ -1,0 +1,20 @@
+torch>=2.0.0
+torchvision>=0.15.0
+numpy
+matplotlib
+tqdm
+pyyaml
+einops
+pillow
+
+# Phase 2: evaluation
+scipy
+pytorch-fid
+
+# Phase 3: text conditioning
+ftfy
+regex
+git+https://github.com/openai/CLIP.git
+
+# Phase 4: demo
+gradio

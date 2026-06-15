@@ -1,0 +1,32 @@
+# Phase 1: Unconditional DDPM on MNIST/Fashion-MNIST
+
+dataset:
+  name: "fashion_mnist"   # options: mnist, fashion_mnist
+  image_size: 28
+  channels: 1
+  batch_size: 128
+
+diffusion:
+  timesteps: 1000
+  beta_schedule: "linear"  # linear (Phase 1) -> cosine (Phase 2)
+  beta_start: 0.0001
+  beta_end: 0.02
+
+model:
+  base_channels: 64
+  channel_mults: [1, 2, 4]
+  num_res_blocks: 2
+  time_emb_dim: 256
+
+training:
+  epochs: 30
+  learning_rate: 2.0e-4
+  device: "cuda"  # set to "cpu" for local debugging
+  save_every: 5
+  sample_every: 5
+  num_samples: 16
+
+paths:
+  checkpoint_dir: "outputs/checkpoints"
+  sample_dir: "outputs/samples"
+  log_dir: "outputs/logs"
