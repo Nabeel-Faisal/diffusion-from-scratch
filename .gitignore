@@ -1,0 +1,29 @@
+# Downloaded datasets (root-level only, not src/data/)
+/data/
+
+# Training outputs (checkpoints, samples, logs)
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
