@@ -256,6 +256,129 @@ def ddim_sample(
 
 
 # ---------------------------------------------------------------------------
+# CFG + DDIM sampler (Phase 3)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def ddim_cfg_sample(
+    model: UNet,
+    clip_enc,
+    prompts: List[str],
+    scheduler: NoiseScheduler,
+    device: torch.device,
+    img_shape: Tuple[int, int, int],
+    n_steps: int = 50,
+    eta: float = 0.0,
+    guidance_scale: float = 7.5,
+    show_progress: bool = True,
+) -> torch.Tensor:
+    """
+    DDIM sampling with classifier-free guidance (CFG, Ho et al. 2022).
+
+    Generates one image per prompt using DDIM and combines conditional and
+    unconditional noise predictions at each step:
+
+        ε_cfg = (1 + w) · ε_cond − w · ε_uncond        (Ho et al. 2022, Eq. 6)
+
+    where w = guidance_scale.  w=0 → pure conditional (ε_cond); larger w
+    amplifies the text signal at the cost of sample diversity.
+
+    Both conditional and unconditional passes are batched into a single UNet
+    forward by doubling the batch:
+
+        x_doubled   = [x | x]          shape (2B, C, H, W)
+        text_doubled = [cond | null]    shape (2B, D)
+
+        ε_cond, ε_uncond = UNet(x_doubled, t, text_doubled).chunk(2)
+
+    This halves wall time per step compared to two separate model calls.
+    The null embedding encodes "" (empty string) via CLIP — same space
+    as real captions, consistent with CFG training convention.
+
+    The DDIM update formula follows ddim_sample exactly; only the noise
+    prediction is replaced with the CFG-combined estimate.
+
+    Args:
+        model:          Conditional UNet with text_emb support.
+        clip_enc:       Frozen CLIPTextEncoder; callable as clip_enc(List[str]).
+        prompts:        B caption strings; generates one image per prompt.
+        scheduler:      NoiseScheduler on `device`.
+        device:         Target device.
+        img_shape:      (C, H, W) per image.
+        n_steps:        Number of DDIM denoising steps S ≤ T.
+        eta:            Stochasticity: 0 = deterministic, 1 ≈ DDPM.
+        guidance_scale: w in the CFG formula.
+        show_progress:  Show tqdm bar.
+
+    Returns:
+        x_0: shape (B, C, H, W), values in [-1, 1].
+    """
+    was_training = model.training
+    model.eval()
+
+    B = len(prompts)
+    C, H, W = img_shape
+
+    # Encode embeddings once before the denoising loop.
+    cond_emb = clip_enc(prompts)           # (B, D)
+    null_emb = clip_enc([""] * B)         # (B, D) — null embedding for CFG
+    text_doubled = torch.cat([cond_emb, null_emb], dim=0)  # (2B, D)
+
+    tau = torch.linspace(scheduler.T - 1, 0, n_steps).round().long().tolist()
+
+    x = torch.randn(B, C, H, W, device=device)
+
+    iterator = (
+        tqdm(range(n_steps), total=n_steps,
+             desc=f"CFG-DDIM ({n_steps} steps, w={guidance_scale})", leave=False)
+        if show_progress else range(n_steps)
+    )
+
+    for i in iterator:
+        t_val = tau[i]
+
+        ab_cur  = scheduler.alpha_bars[t_val]
+        t_prev  = tau[i + 1] if i + 1 < n_steps else -1
+        ab_prev = (
+            scheduler.alpha_bars[t_prev]
+            if t_prev >= 0
+            else torch.tensor(1.0, device=device)
+        )
+
+        # Single batched forward for both conditional and unconditional paths.
+        x_doubled = torch.cat([x, x], dim=0)                           # (2B, C, H, W)
+        t_doubled  = torch.full((2 * B,), t_val, dtype=torch.long, device=device)
+        eps_both   = model(x_doubled, t_doubled, text_emb=text_doubled) # (2B, C, H, W)
+        eps_cond, eps_uncond = eps_both[:B], eps_both[B:]
+
+        # CFG combination (Ho et al. 2022, Eq. 6):
+        #   ε_cfg = (1+w)·ε_cond − w·ε_uncond
+        eps = (1.0 + guidance_scale) * eps_cond - guidance_scale * eps_uncond
+
+        # DDIM update (identical to ddim_sample after this point).
+        x0_pred = (
+            (x - scheduler.sqrt_one_minus_alpha_bars[t_val] * eps)
+            / scheduler.sqrt_alpha_bars[t_val]
+        ).clamp(-1.0, 1.0)
+
+        sigma = (
+            eta
+            * torch.sqrt((1.0 - ab_prev) / (1.0 - ab_cur).clamp(min=1e-8))
+            * torch.sqrt(torch.clamp(1.0 - ab_cur / ab_prev.clamp(min=1e-8), min=0.0))
+        )
+        dir_coeff = torch.sqrt(torch.clamp(1.0 - ab_prev - sigma ** 2, min=0.0))
+
+        x = ab_prev.sqrt() * x0_pred + dir_coeff * eps
+        if eta > 0.0:
+            x = x + sigma * torch.randn_like(x)
+
+    if was_training:
+        model.train()
+
+    return x
+
+
+# ---------------------------------------------------------------------------
 # Sanity checks
 # ---------------------------------------------------------------------------
 
@@ -355,5 +478,54 @@ if __name__ == "__main__":
     out1 = ddim_sample(model, scheduler, N, (C, H, W), device, n_steps=1, eta=0.0, show_progress=False)
     assert out1.shape == (N, C, H, W) and torch.isfinite(out1).all()
     print("[PASS] n_steps=1 completes successfully")
+
+    # ------------------------------------------------------------------ CFG-DDIM
+    print("\n=== CFG-DDIM (mock CLIP, Phase 3) ===")
+
+    # Mock CLIP encoder: returns random unit-normalised vectors.
+    # Real CLIPTextEncoder is not used here to keep the check dependency-free.
+    class _MockCLIP:
+        """Minimal stand-in for CLIPTextEncoder.forward()."""
+        def __call__(self, captions: List[str]) -> torch.Tensor:
+            vecs = torch.randn(len(captions), 512)
+            return vecs / vecs.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+
+    # Conditional UNet with tiny text_emb_dim for the mock.
+    cond_model = UNet(
+        img_channels=C, base_channels=32, channel_mults=(1, 2),
+        num_res_blocks=1, time_emb_dim=64, text_emb_dim=512, attn_heads=8,
+    ).to(device)
+
+    mock_enc = _MockCLIP()
+    prompts  = ["a photo of a cat", "a photo of a dog", "a photo of a frog", "a photo of a ship"]
+
+    # 12. Output shape
+    model.train()
+    out_cfg = ddim_cfg_sample(
+        cond_model, mock_enc, prompts, scheduler, device,
+        img_shape=(C, H, W), n_steps=5, eta=0.0, guidance_scale=7.5,
+    )
+    assert out_cfg.shape == (len(prompts), C, H, W), f"Shape: {out_cfg.shape}"
+    print(f"[PASS] 12. CFG-DDIM output shape: {tuple(out_cfg.shape)}")
+
+    # 13. Values finite
+    assert torch.isfinite(out_cfg).all()
+    print(f"[PASS] 13. Values finite  [{out_cfg.min():.3f}, {out_cfg.max():.3f}]")
+
+    # 14. model.training restored (cond_model was in train mode before call)
+    assert cond_model.training
+    print("[PASS] 14. model.training restored after CFG sampling")
+
+    # 15. Guidance scale affects output (w=0 vs w=7.5 differ)
+    torch.manual_seed(3)
+    out_w0  = ddim_cfg_sample(cond_model, mock_enc, prompts, scheduler, device,
+                               img_shape=(C, H, W), n_steps=5, guidance_scale=0.0,
+                               show_progress=False)
+    torch.manual_seed(3)
+    out_w75 = ddim_cfg_sample(cond_model, mock_enc, prompts, scheduler, device,
+                               img_shape=(C, H, W), n_steps=5, guidance_scale=7.5,
+                               show_progress=False)
+    assert not torch.allclose(out_w0, out_w75), "guidance_scale has no effect"
+    print("[PASS] 15. w=0 and w=7.5 produce different outputs (guidance is live)")
 
     print("\nAll sanity checks passed.")

@@ -1,52 +1,58 @@
 # Phase 3 — Text-conditioned DDPM on CIFAR-10 (32×32 RGB, 10 classes)
 #
-# Classifier-free guidance (CFG) training:
-#   Each caption is replaced by an empty string "" with probability
-#   training.p_uncond, training the model for both conditional and
-#   unconditional generation with shared weights.
-#
-# At inference, CFG combines both passes:
-#   ε_cfg = ε_uncond + w · (ε_cond − ε_uncond)   (Ho et al. 2022, Eq. 6)
-# where w = sampling.guidance_scale.
+# Classifier-free guidance (CFG):
+#   During training, each caption is dropped to "" with probability training.p_uncond,
+#   training a single model for both conditional and unconditional generation.
+#   At inference (scripts/sample.py), CFG combines two forward passes per step:
+#     ε_cfg = (1+w)·ε_cond − w·ε_uncond   (Ho et al. 2022, Eq. 6)
+#   where w = sampling.guidance_scale.
 
 dataset:
   name: "cifar10"
+  image_size: 32
+  channels: 3
   batch_size: 128
   num_workers: 4
 
 diffusion:
-  T: 1000
+  timesteps: 1000
   beta_schedule: "cosine"
-  cosine_s: 0.008          # offset to prevent β_t from being too small near t=0
+  beta_start: 0.0001          # unused for cosine; kept for API consistency
+  beta_end: 0.02              # unused for cosine; kept for API consistency
+  cosine_s: 0.008             # cosine offset (Nichol & Dhariwal 2021)
 
 model:
-  img_channels: 3
   base_channels: 128
-  channel_mults: [1, 2, 4]  # feature maps: 128 → 256 → 512
+  channel_mults: [1, 2, 4]   # feature map widths: 128 → 256 → 512
   num_res_blocks: 2
   time_emb_dim: 256
-  text_emb_dim: 512          # CLIP ViT-B/32 output dimension
-  attn_heads: 8              # 8 heads × 64 dim_head = 512 at bottleneck
-  # cross-attention inserted at: bottleneck (between mid_block1/2) + up_blocks[0]
-  # n_ctx=4 virtual context tokens from the CLIP embedding (default in CrossAttentionBlock)
+  text_emb_dim: 512           # CLIP ViT-B/32 embedding dimension
+  attn_heads: 8               # 8 heads × 64 dim/head = 512 at bottleneck
+  # n_ctx=4 virtual context tokens (CrossAttentionBlock default) inserted at:
+  #   bottleneck (between mid_block1/2) and after up_blocks[0]
 
 clip:
-  model_name: "ViT-B/32"    # frozen; never updated during training
+  model_name: "ViT-B/32"     # frozen CLIP text encoder — never updated during training
 
 training:
   epochs: 50
-  lr: 2.0e-4
-  lr_warmup_steps: 500
-  p_uncond: 0.1              # probability of dropping caption → unconditional pass (CFG)
-  grad_clip: 1.0
-  ema_decay: 0.9999
-  save_every: 5              # save checkpoint every N epochs
-  sample_every: 5            # save sample grid every N epochs
-  n_samples: 16              # samples per grid
+  learning_rate: 2.0e-4
+  lr_warmup_steps: 500        # linear LR warmup over first 500 optimizer steps
+  p_uncond: 0.1               # per-sample CFG dropout probability
+  grad_clip: 1.0              # gradient norm clipping threshold
+  ema_decay: 0.9999           # EMA of model weights used for sample grids
   device: "cuda"
-
-sampling:
+  save_every: 5               # checkpoint every N epochs
+  sample_every: 5             # sample grid every N epochs
+  num_samples: 10             # one per CIFAR-10 class — tracks per-class quality
   sampler: "ddim"
   ddim_steps: 50
-  ddim_eta: 0.0              # η=0 → fully deterministic
-  guidance_scale: 7.5        # w in CFG formula; w=0 → unconditional, w>0 → guided
+  ddim_eta: 0.0               # η=0 → fully deterministic
+
+sampling:                     # inference settings (scripts/sample.py)
+  guidance_scale: 7.5         # w in CFG formula
+
+paths:
+  checkpoint_dir: "outputs/checkpoints"
+  sample_dir: "outputs/samples"
+  log_dir: "outputs/logs"
